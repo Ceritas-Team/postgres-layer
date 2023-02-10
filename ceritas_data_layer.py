@@ -134,6 +134,15 @@ class Ceritas_Database:
         self.cursor.execute("SELECT {column} FROM core_products WHERE id IN %s;".format(column=column or "*"), (product_tuple,))
         return self.fetchall()
 
+    def get_product_info_by_uuid(self, uuid, column=None):
+        if column is not None:
+            column = self.list_to_sql(column)
+        if type(uuid) is not list: uuid = [ uuid ]
+        uuid_tuple = tuple(uuid)
+
+        self.cursor.execute("SELECT {column} FROM core_products WHERE id IN %s;".format(column=column or "*"), (product_tuple,))
+        return self.fetchall()
+
     # no inputs. grabs all core_product_ids which are linked to nvd_products
     def get_vulnerable_products(self):
         self.cursor.execute("SELECT core_product_id FROM nvd_products WHERE core_product_id IS NOT NULL;")
@@ -238,6 +247,9 @@ class Ceritas_Database:
         self.cursor.execute("SELECT {column} FROM nvd_cves WHERE cve IN %s;".format(column=column or "*"), (cve,))
         return self.fetchall()
 
+
+    # given a product_id (or list of ids), return severity score of each CVE associated with the product.
+    # for use with rating algorithm
     def get_all_severities_for_product(self, product_id):
         cve_ids = self.get_product_vulnerability_ids(product_id)
         severities = self.get_cve_info_by_id(cve_ids, 'severity')
