@@ -1,6 +1,4 @@
-# ******************
 # CERITAS DATA LAYER
-# ******************
 
 ceritas_data_layer.py contains the class Ceritas_Database.
 This class starts up a connection to our Ceritas database, given correct credentials.
