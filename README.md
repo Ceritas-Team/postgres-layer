@@ -10,3 +10,5 @@ from ceritas_data_layer import Ceritas_Database
 
 db_instance = Ceritas_Database(database, user, password, host)
 ```
+
+Look at "examples.py" file to see how some of the functions are used.

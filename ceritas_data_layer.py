@@ -1,4 +1,5 @@
 import psycopg2
+from psycopg2.extras import RealDictCursor
 
 class Ceritas_Database:
     def __init__(self, database, user, password, host):
@@ -7,6 +8,7 @@ class Ceritas_Database:
                 password=password,
                 host=host)
         self._cursor = self._conn.cursor()
+        self._dict_cursor = self._conn.cursor(cursor_factory=RealDictCursor)
 
     def __enter__(self):
         return self
@@ -21,6 +23,10 @@ class Ceritas_Database:
     @property
     def cursor(self):
         return self._cursor
+
+    @property
+    def dict_cursor(self):
+        return self._dict_cursor
 
     def commit(self):
         self.connection.commit()
@@ -45,22 +51,24 @@ class Ceritas_Database:
 
     # helper function, to convert list of columns to sql
     def list_to_sql(self, this_list):
-        if type(this_list) is not list: this_list = [ this_list ]
-        sql = ""
-        for item in this_list:
-            sql = sql + item + ', '
-        sql = sql[:-2] # remove final comma
+        if this_list is not None:
+            if type(this_list) is not list: this_list = [ this_list ]
+            sql = ""
+            for item in this_list:
+                sql = sql + item + ', '
+            sql = sql[:-2] # remove final comma
+        else:
+            sql = None
         return sql
 
     # retrieves all rows from a table. 
     # table: string. name of table to pull from
     # column: optional, string or list of strings. column(s) to pull instead of all columns
     def get_all_from_table(self, table, column=None):
-        if column is not None:
-            column = self.list_to_sql(column)
-        sql = "SELECT {columns} FROM {table};".format(columns=column or '*', table=table)
-        self.cursor.execute(sql)
-        result = self.fetchall()
+        column_txt = self.list_to_sql(column)
+        sql = "SELECT {columns} FROM {table};".format(columns=column_txt or '*', table=table)
+        self.dict_cursor.execute(sql)
+        result = self.dict_cursor.fetchall()
         items = []
         for item in result:
             items.append(item)
@@ -80,8 +88,6 @@ class Ceritas_Database:
 
     # returns all product_id's associated with customers. can fill in column parameter to get other or all columns
     def get_all_customer_products(self, column=None):
-        if column is not None:
-            column = self.list_to_sql(column)
         self.cursor.execute("SELECT id FROM groups WHERE is_default = true;")
         default_groups = self.fetchall()
 
@@ -98,12 +104,13 @@ class Ceritas_Database:
         items = []
         for item in result:
             items.append(item[0])
-        return items
+
+        products = self.get_product_info_by_id(items, column or "id")
+        return products
 
     # returns all product_ids for a specific customer. can select specific columns besides product_id to fetch
     def get_one_customer_products(self, customer, column=None):
-        if column is not None:
-            column = self.list_to_sql(column)
+        column_txt = self.list_to_sql(column)
 
         self.cursor.execute("SELECT id FROM groups WHERE is_default = true AND name = %s;", (customer,))
         default_groups = self.fetchall()
@@ -121,40 +128,44 @@ class Ceritas_Database:
         items = []
         for item in result:
             items.append(item[0])
-        return items
+
+        products = self.get_product_info_by_id(items, column or "id")
+        return products
 
     # core_product_id: id or list of id's to pull product info from
     # column: string or list of strings, specifying which columns to pull down. if blank, all columns are pulled down.
     def get_product_info_by_id(self, core_product_id, column=None):
-        if column is not None:
-            column = self.list_to_sql(column)
+        column_txt = self.list_to_sql(column)
         if type(core_product_id) is not list: core_product_id = [ core_product_id ]
         product_tuple = tuple(core_product_id)
 
-        self.cursor.execute("SELECT {column} FROM core_products WHERE id IN %s;".format(column=column or "*"), (product_tuple,))
-        return self.fetchall()
+        self.dict_cursor.execute("SELECT {column} FROM core_products WHERE id IN %s;".format(column=column_txt or "*"), (product_tuple,))
+        return self.dict_cursor.fetchall()
 
+    # uuid: uuid or list of uuid's to pull product info from
+    # column: string or list of strings, specifying which columns to pull down. if blank, all columns are pulled down.
     def get_product_info_by_uuid(self, uuid, column=None):
-        if column is not None:
-            column = self.list_to_sql(column)
+        column_txt = self.list_to_sql(column)
         if type(uuid) is not list: uuid = [ uuid ]
         uuid_tuple = tuple(uuid)
 
-        self.cursor.execute("SELECT {column} FROM core_products WHERE id IN %s;".format(column=column or "*"), (product_tuple,))
-        return self.fetchall()
+        self.dict_cursor.execute("SELECT {column} FROM core_products WHERE uuid IN %s;".format(column=column_txt or "*"), (uuid_tuple,))
+        return self.dict_cursor.fetchall()
 
     # no inputs. grabs all core_product_ids which are linked to nvd_products
-    def get_vulnerable_products(self):
+    def get_vulnerable_products(self, column=None):
         self.cursor.execute("SELECT core_product_id FROM nvd_products WHERE core_product_id IS NOT NULL;")
         result = self.fetchall()
         product_id_list = []
         for item in result:
             product_id_list.append(item[0])
-        return product_id_list
+
+        products = self.get_product_info_by_id(product_id_list, column or "id")
+        return products
 
     # product_id: product id or list of ids.
     # column: string or list of strings, column names to pull from core_rating_history table. "value" is pulled by default
-    # returns rating value for each id passed. 
+    # returns rating value for each id passed. if any product does not have a rating, their space in list will have a value of "None"
     def get_product_rating(self, product_id, column=None):
         if type(product_id) is not list: product_id = [ product_id ]
         product_id_tuple = tuple()
@@ -168,14 +179,16 @@ class Ceritas_Database:
         for item in result:
             core_rating_history_ids = core_rating_history_ids + item
 
-        self.cursor.execute("SELECT {column} FROM core_rating_history WHERE id IN %s;".format(column=column or "value"), (core_rating_history_ids,))
-        result = self.fetchall()
+        ratings = []
+        for id in core_rating_history_ids:
+            if id is not None:
+                self.execute("SELECT {column} FROM core_rating_history WHERE id IN %s;".format(column=column or "value"), (core_rating_history_ids,))
+                result = self.fetchone()[0]
+                ratings.append(result)
+            else:
+                ratings.append(None)
 
-        rating_value_list = []
-        for item in result:
-            rating_value_list.append(item[0])
-
-        return rating_value_list
+        return ratings
 
     # pass in product_id: get all vulnerabilities connected to this product
     # pass in list of product_id: get all vulnerabilities for list of products
@@ -225,32 +238,30 @@ class Ceritas_Database:
     # nvd_cve_id: an nvd_cve_id or list of ids.
     # column: column name or list of names. optional. specifies specific columns to pull rather than all
     def get_cve_info_by_id(self, nvd_cve_id, column=None):
-        if column is not None:
-            column = self.list_to_sql(column)
+        column_txt = self.list_to_sql(column)
         if type(nvd_cve_id) is not list: nvd_cve_id = [ nvd_cve_id ]
         nvd_cve_tuple = tuple(nvd_cve_id)
 
         if len(nvd_cve_tuple) > 0:
-            self.cursor.execute("SELECT {column} FROM nvd_cves WHERE id IN %s;".format(column=column or "*"), (nvd_cve_tuple,))
-            return self.fetchall()
+            self.dict_cursor.execute("SELECT {column} FROM nvd_cves WHERE id IN %s;".format(column=column_txt or "*"), (nvd_cve_tuple,))
+            return self.dict_cursor.fetchall()
         else:
             return -1
 
     # cve: cve string, for example: "CVE-2022-2222"
     # column: column name or list of names. optional. pull specific columns, or all columns if blank
     def get_cve_info_by_name(self, cve, column=None):
-        if column is not None:
-            column = self.list_to_sql(column)
+        column_txt = self.list_to_sql(column)
         if type(cve) is not list: cve = [ cve ]
         cve = tuple(cve)
 
-        self.cursor.execute("SELECT {column} FROM nvd_cves WHERE cve IN %s;".format(column=column or "*"), (cve,))
-        return self.fetchall()
-
+        self.dict_cursor.execute("SELECT {column} FROM nvd_cves WHERE cve IN %s;".format(column=column_txt or "*"), (cve,))
+        return self.dict_cursor.fetchall()
 
     # given a product_id (or list of ids), return severity score of each CVE associated with the product.
+    # returns severities as a list of values
     # for use with rating algorithm
     def get_all_severities_for_product(self, product_id):
         cve_ids = self.get_product_vulnerability_ids(product_id)
         severities = self.get_cve_info_by_id(cve_ids, 'severity')
-        return severities
+        return [item['severity'] for item in severities]
