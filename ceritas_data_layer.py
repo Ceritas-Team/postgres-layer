@@ -265,3 +265,15 @@ class Ceritas_Database:
         cve_ids = self.get_product_vulnerability_ids(product_id)
         severities = self.get_cve_info_by_id(cve_ids, 'severity')
         return [item['severity'] for item in severities]
+
+    def get_nvd_vendor_by_name(self, cpe_vendor, column=None):
+        column_txt = self.list_to_sql(column)
+        self.dict_cursor.execute("SELECT {column} FROM nvd_vendors WHERE cpe_vendor = %s;".format(column=column_txt or "*"), (cpe_vendor,))
+        return self.dict_cursor.fetchall()
+
+    def get_all_nvd_products_by_vendor(self, cpe_vendor, column=None):
+        column_txt = self.list_to_sql(column)
+        vendor = self.get_nvd_vendor_by_name(cpe_vendor, "id")
+        nvd_vendor_id = vendor[0]['id']
+        self.dict_cursor.execute("SELECT {column} FROM nvd_products WHERE nvd_vendor_id = %s;".format(column=column_txt or "*"), (nvd_vendor_id,))
+        return self.dict_cursor.fetchall()
