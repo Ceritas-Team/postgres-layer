@@ -1,5 +1,20 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import configparser
+
+config = configparser.ConfigParser(allow_no_value=True)
+config.read('configs/rating_config.ini')
+
+LOW_WEIGHT = float(config['Weights']['low'])
+HIGH_WEIGHT = float(config['Weights']['high'])
+CRITICAL_WEIGHT = float(config['Weights']['crit'])
+
+MINIMUM_SEVERITY = float(config['min max']['min'])
+MAX_SEVERITY = float(config['min max']['max'])
+
+ATTENTION_CUTOFF = float(config['Rating Cutoffs']['attention'])
+CAUTION_CUTOFF = float(config['Rating Cutoffs']['caution'])
+ALERT_CUTOFF = float(config['Rating Cutoffs']['alert'])
 
 class Ceritas_Database:
     def __init__(self, database, user, password, host):
@@ -115,21 +130,24 @@ class Ceritas_Database:
         self.cursor.execute("SELECT id FROM groups WHERE is_default = true AND name = %s;", (customer,))
         default_groups = self.fetchall()
 
-        product_instance_ids = tuple()
-
-        for group in default_groups:
-            self.cursor.execute("SELECT product_instance_id FROM product_instance_group WHERE group_id = %s;", (group[0],))
+        if len(default_groups) > 0:
+            product_instance_ids = tuple()
+    
+            for group in default_groups:
+                self.cursor.execute("SELECT product_instance_id FROM product_instance_group WHERE group_id = %s;", (group[0],))
+                result = self.fetchall()
+                for item in result:
+                    product_instance_ids = product_instance_ids + item
+    
+            self.cursor.execute("SELECT product_id FROM product_instances WHERE id in %s;", (product_instance_ids,))
             result = self.fetchall()
+            items = []
             for item in result:
-                product_instance_ids = product_instance_ids + item
-
-        self.cursor.execute("SELECT product_id FROM product_instances WHERE id in %s;", (product_instance_ids,))
-        result = self.fetchall()
-        items = []
-        for item in result:
-            items.append(item[0])
-
-        products = self.get_product_info_by_id(items, column or "id")
+                items.append(item[0])
+    
+            products = self.get_product_info_by_id(items, column or "id")
+        else:
+            products = []
         return products
 
     # core_product_id: id or list of id's to pull product info from
@@ -189,6 +207,20 @@ class Ceritas_Database:
                 ratings.append(None)
 
         return ratings
+        
+    def get_nvd_product_from_core_product(self, core_product_id, column=None):
+        column_txt = self.list_to_sql(column)
+        if type(core_product_id) is not list: core_product_id = [ core_product_id ]
+        product_id_tuple = tuple()
+        for id in core_product_id:
+            product_id_tuple = product_id_tuple + (id,)
+            
+        self.cursor.execute("SELECT {column} FROM nvd_products WHERE core_product_id = %s;".format(column=column_txt or "id"), (product_id_tuple,))
+        result = self.fetchone()
+        if result is not None:
+            return result[0]
+        else:
+            return -1
 
     # pass in product_id: get all vulnerabilities connected to this product
     # pass in list of product_id: get all vulnerabilities for list of products
@@ -234,6 +266,30 @@ class Ceritas_Database:
             return nvd_cve_id_list
         else:
             return -1
+            
+    def get_nvd_product_vulnerability_ids(self, nvd_product_id):
+        self.cursor.execute("SELECT id FROM nvd_cpe_matches WHERE nvd_product_id = %s", (nvd_product_id,))
+        result = self.fetchall()
+        
+        nvd_cpe_match_ids = tuple()
+        for item in result:
+            nvd_cpe_match_ids = nvd_cpe_match_ids + item
+
+        self.cursor.execute("SELECT nvd_configuration_id FROM nvd_cpe_match_configuration WHERE nvd_cpe_match_id IN %s", (nvd_cpe_match_ids,))
+        result = self.fetchall()
+        
+        nvd_configuration_ids = tuple()
+        for item in result:
+            nvd_configuration_ids = nvd_configuration_ids + item
+
+        self.cursor.execute("SELECT nvd_cve_id FROM nvd_configuration_cve WHERE nvd_configuration_id IN %s;", (nvd_configuration_ids,))
+        result = self.fetchall()
+        
+        nvd_cve_id_list = []
+        for item in result:
+            nvd_cve_id_list.append(item[0])
+
+        return nvd_cve_id_list
 
     # nvd_cve_id: an nvd_cve_id or list of ids.
     # column: column name or list of names. optional. specifies specific columns to pull rather than all
@@ -266,6 +322,7 @@ class Ceritas_Database:
         severities = self.get_cve_info_by_id(cve_ids, 'severity')
         return [item['severity'] for item in severities]
 
+    # given an NVD vendor name, return its row of nvd_vendors (or list of columns specified as column input)
     def get_nvd_vendor_by_name(self, cpe_vendor, column=None):
         column_txt = self.list_to_sql(column)
         self.dict_cursor.execute("SELECT {column} FROM nvd_vendors WHERE cpe_vendor = %s;".format(column=column_txt or "*"), (cpe_vendor,))
@@ -277,3 +334,63 @@ class Ceritas_Database:
         nvd_vendor_id = vendor[0]['id']
         self.dict_cursor.execute("SELECT {column} FROM nvd_products WHERE nvd_vendor_id = %s;".format(column=column_txt or "*"), (nvd_vendor_id,))
         return self.dict_cursor.fetchall()
+        
+    ####### need to write logic for components as well #######
+    # input: one or a list of core_product_ids
+    # this function rates all of these products with the help of rate_nvd_product()
+    # rates based on NVD CVEs, and returns a passing score if the product is not linked to nvd
+    def rate_core_product(self, core_product_ids):
+        ratings = []
+        for product in core_product_ids:
+            nvd_product_id = self.get_nvd_product_from_core_product(product)
+            if nvd_product_id != -1:
+                rating = self.rate_nvd_product(nvd_product_id)
+            else:
+                rating = [250]
+            ratings.extend(rating)
+        return ratings
+    
+    # input: one or a list of nvd_product_ids
+    # this function rates all of these products based on the severities of associated CVEs
+    # returns a list of ratings (even if the length is 1)
+    def rate_nvd_product(self, nvd_product_ids):
+        ratings = []
+        if type(nvd_product_ids) is not list: nvd_product_ids = [ nvd_product_ids ]
+        for nvd_product_id in nvd_product_ids:
+            cve_ids = self.get_nvd_product_vulnerability_ids(nvd_product_id)
+            severities = self.get_cve_info_by_id(cve_ids, 'severity')
+            
+            severity_sum_weighted = 0.0
+            
+            for score in severities:
+                score = float(score['severity'])
+                if score >= 7.0:
+                    if score >= 9.0:
+                        severity_weighted = score * CRITICAL_WEIGHT
+                    else:
+                        severity_weighted = score * HIGH_WEIGHT
+                else:
+                    severity_weighted = score * LOW_WEIGHT
+                severity_sum_weighted = severity_sum_weighted + severity_weighted
+                
+            if severity_sum_weighted > MAX_SEVERITY:
+                        severity_sum_weighted = MAX_SEVERITY
+                    
+            normal_numerator = severity_sum_weighted - MINIMUM_SEVERITY
+            normal_denominator = MAX_SEVERITY - MINIMUM_SEVERITY
+            
+            product_severity = (normal_numerator / normal_denominator) * 10
+            
+            if product_severity > ATTENTION_CUTOFF:
+                if product_severity > CAUTION_CUTOFF:
+                    if product_severity > ALERT_CUTOFF:
+                        product_rating = 100
+                    else:
+                        product_rating = 150
+                else:
+                    product_rating = 200
+            else:
+                product_rating = 250
+                
+            ratings.append(product_rating)
+        return ratings
