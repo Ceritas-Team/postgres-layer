@@ -64,6 +64,11 @@ class Ceritas_Database:
         self.cursor.execute(sql, params or ())
         return self.fetchall()
 
+    def parse_condition(self, condition):
+        words = condition.split()
+        condition_pair = (words[0], words[2])
+        return condition_pair
+
     # helper function, to convert list of columns to sql
     def list_to_sql(self, this_list):
         if this_list is not None:
@@ -79,10 +84,19 @@ class Ceritas_Database:
     # retrieves all rows from a table. 
     # table: string. name of table to pull from
     # column: optional, string or list of strings. column(s) to pull instead of all columns
-    def get_all_from_table(self, table, column=None):
+    # "condition" is an optional argument to add a condition to your query.
+    #    currently, we accept conditions in the form of "id = 560", for example. 
+    def get_all_from_table(self, table, column=None, condition=None):
         column_txt = self.list_to_sql(column)
-        sql = "SELECT {columns} FROM {table};".format(columns=column_txt or '*', table=table)
-        self.dict_cursor.execute(sql)
+        sql = "SELECT {columns} FROM {table}".format(columns=column_txt or '*', table=table)
+        if condition is not None:
+            condition_pair = self.parse_condition(condition)
+            sql = sql + " WHERE {column} = %s;".format(column=condition_pair[0])
+            val = (condition_pair[1],)
+        else:
+            sql = sql + ";"
+            val = ()
+        self.dict_cursor.execute(sql, val)
         result = self.dict_cursor.fetchall()
         items = []
         for item in result:
@@ -90,14 +104,18 @@ class Ceritas_Database:
         return items
 
     # returns the number of rows from a table. 
-    # "nonnull" is the name of a column, if you wish to only count rows where this column is not null
-    def get_count_from_table(self, table, nonnull=None):
+    # "condition" is an optional argument to add a condition to your query.
+    #    currently, we accept conditions in the form of "id = 560", for example. 
+    def get_count_from_table(self, table, condition=None):
         sql = "SELECT COUNT(*) FROM {table}".format(table=table)
-        if nonnull is not None:
-            sql = sql + " WHERE {nonnull} IS NOT NULL;".format(nonnull=nonnull)
+        if condition is not None:
+            condition_pair = self.parse_condition(condition)
+            sql = sql + " WHERE {column} = %s;".format(column=condition_pair[0])
+            val = (condition_pair[1],)
         else:
             sql = sql + ";"
-        self.cursor.execute(sql)
+            val = ()
+        self.cursor.execute(sql, val)
         result = self.fetchall()
         return result[0][0]
 
