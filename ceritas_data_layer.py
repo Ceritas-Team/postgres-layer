@@ -3,7 +3,7 @@ from psycopg2.extras import RealDictCursor
 import configparser
 
 config = configparser.ConfigParser(allow_no_value=True)
-config.read('configs/rating_config.ini')
+config.read('Reporting/rating_config.ini')
 
 LOW_WEIGHT = float(config['Weights']['low'])
 HIGH_WEIGHT = float(config['Weights']['high'])
@@ -63,12 +63,17 @@ class Ceritas_Database:
     def query(self, sql, params=None):
         self.cursor.execute(sql, params or ())
         return self.fetchall()
-
+        
     def parse_condition(self, condition):
         words = condition.split()
-        condition_pair = (words[0], words[2])
+        val = ""
+        for i in range(2, len(words)):
+            if i > 2:
+                val = val + " "
+            val = val + words[i]
+        condition_pair = (words[0], val)
         return condition_pair
-
+        
     # helper function, to convert list of columns to sql
     def list_to_sql(self, this_list):
         if this_list is not None:
@@ -84,18 +89,21 @@ class Ceritas_Database:
     # retrieves all rows from a table. 
     # table: string. name of table to pull from
     # column: optional, string or list of strings. column(s) to pull instead of all columns
-    # "condition" is an optional argument to add a condition to your query.
-    #    currently, we accept conditions in the form of "id = 560", for example. 
-    def get_all_from_table(self, table, column=None, condition=None):
+    def get_all_from_table(self, table, column=None, condition=None, nonnull=None):
         column_txt = self.list_to_sql(column)
         sql = "SELECT {columns} FROM {table}".format(columns=column_txt or '*', table=table)
         if condition is not None:
             condition_pair = self.parse_condition(condition)
-            sql = sql + " WHERE {column} = %s;".format(column=condition_pair[0])
+            sql = sql + " WHERE {column} = %s".format(column=condition_pair[0])
             val = (condition_pair[1],)
+
+            if nonnull is not None:
+                sql = sql + " AND {} IS NOT NULL".format(nonnull)
         else:
-            sql = sql + ";"
             val = ()
+
+             if nonnull is not None:
+                sql = sql + " WHERE {} IS NOT NULL".format(nonnull)
         self.dict_cursor.execute(sql, val)
         result = self.dict_cursor.fetchall()
         items = []
@@ -104,17 +112,22 @@ class Ceritas_Database:
         return items
 
     # returns the number of rows from a table. 
-    # "condition" is an optional argument to add a condition to your query.
-    #    currently, we accept conditions in the form of "id = 560", for example. 
-    def get_count_from_table(self, table, condition=None):
+    # "condition" can apply a condition. "WHERE column = value" is all we currently accept
+    # "nonnull" is the name of a column, if you wish to only count rows where this column is not null
+    def get_count_from_table(self, table, condition=None, nonnull=None):
         sql = "SELECT COUNT(*) FROM {table}".format(table=table)
         if condition is not None:
             condition_pair = self.parse_condition(condition)
-            sql = sql + " WHERE {column} = %s;".format(column=condition_pair[0])
+            sql = sql + " WHERE {column} = %s".format(column=condition_pair[0])
             val = (condition_pair[1],)
+            
+            if nonnull is not None:
+                sql = sql + " AND {} IS NOT NULL".format(nonnull)
         else:
-            sql = sql + ";"
             val = ()
+            if nonnull is not None:
+                sql = sql + " WHERE {} IS NOT NULL".format(nonnull)
+                
         self.cursor.execute(sql, val)
         result = self.fetchall()
         return result[0][0]
@@ -340,7 +353,6 @@ class Ceritas_Database:
         severities = self.get_cve_info_by_id(cve_ids, 'severity')
         return [item['severity'] for item in severities]
 
-    # given an NVD vendor name, return its row of nvd_vendors (or list of columns specified as column input)
     def get_nvd_vendor_by_name(self, cpe_vendor, column=None):
         column_txt = self.list_to_sql(column)
         self.dict_cursor.execute("SELECT {column} FROM nvd_vendors WHERE cpe_vendor = %s;".format(column=column_txt or "*"), (cpe_vendor,))
@@ -353,10 +365,7 @@ class Ceritas_Database:
         self.dict_cursor.execute("SELECT {column} FROM nvd_products WHERE nvd_vendor_id = %s;".format(column=column_txt or "*"), (nvd_vendor_id,))
         return self.dict_cursor.fetchall()
         
-    ####### need to write logic for components as well #######
-    # input: one or a list of core_product_ids
-    # this function rates all of these products with the help of rate_nvd_product()
-    # rates based on NVD CVEs, and returns a passing score if the product is not linked to nvd
+    # need to write logic for components as well
     def rate_core_product(self, core_product_ids):
         ratings = []
         for product in core_product_ids:
@@ -367,10 +376,7 @@ class Ceritas_Database:
                 rating = [250]
             ratings.extend(rating)
         return ratings
-    
-    # input: one or a list of nvd_product_ids
-    # this function rates all of these products based on the severities of associated CVEs
-    # returns a list of ratings (even if the length is 1)
+        
     def rate_nvd_product(self, nvd_product_ids):
         ratings = []
         if type(nvd_product_ids) is not list: nvd_product_ids = [ nvd_product_ids ]
